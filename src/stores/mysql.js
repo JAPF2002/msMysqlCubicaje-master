@@ -1,11 +1,25 @@
+// msMysqlCubicaje-master/src/stores/mysql.js
+// Capa de acceso a datos para msMysqlCubicaje.
+// ÚNICO responsable de hablar con MySQL mediante el pool de ../utils/connection.
+
 const pool = require('../utils/connection');
 
-/** Determina el nombre de la PK según la tabla */
+/** Determina el nombre de la PK según la tabla (en español) */
 function getIdField(table) {
-  if (table === 'bodegas') return 'id_bodega';
-  if (table === 'bodega_items') return 'id_bodega_item';
-  // por defecto:
-  return 'id';
+  switch (table) {
+    case 'bodegas':
+      return 'id_bodega';
+    case 'bodega_items':
+      return 'id_bodega_item';
+    case 'items':
+      return 'id_item';
+    case 'categorias':
+      return 'id_categoria';
+    case 'usuarios':
+      return 'id_usuario';
+    default:
+      return 'id';
+  }
 }
 
 /* ----------------- SELECT ALL ----------------- */
@@ -43,44 +57,56 @@ function get(table, id) {
 /* ----------------- INSERT ----------------- */
 /**
  * Formatos soportados:
- * 1) { data, params }         -> respeta lo que mande msApiCubicaje
- * 2) { campo1: v1, ... }      -> objeto plano
- *    - en bodegas: usuario_id -> id_usuario
+ * 1) { data, params }
+ *    - params: string con columnas, ej: "nombre, ciudad, direccion"
+ *    - data: objeto con los valores en el mismo orden lógico
+ * 2) objeto plano { campo: valor }
+ *    - auto genera columnas a partir de las keys del objeto
+ *    - en bodegas: usuario_id -> id_usuario (normalizado)
  */
 function insert(table, body) {
   let data;
   let params;
 
   if (body && body.data && body.params) {
-    // Formato antiguo explícito
+    // Modo explícito
     data = { ...body.data };
     params = body.params;
   } else if (body && typeof body === 'object') {
-    // Objeto plano: clonamos y ajustamos
+    // Modo objeto plano
     data = { ...body };
 
-    // Normalización específica por tabla
     if (table === 'bodegas') {
-      // si viene usuario_id desde la API, lo usamos como id_usuario (columna real)
+      // Normalizar nombres a columnas reales
       if (data.usuario_id && !data.id_usuario) {
         data.id_usuario = data.usuario_id;
       }
-      delete data.usuario_id; // la tabla no tiene esta columna
+      delete data.usuario_id;
     }
 
-    params = Object.keys(data).join(',');
+    const keys = Object.keys(data);
+    if (!keys.length) {
+      return Promise.reject(
+        new Error('insert(): objeto de datos vacío.')
+      );
+    }
+
+    params = keys.join(', ');
   } else {
     return Promise.reject(
-      new Error('insert(): formato inválido, se esperaba {data, params} u objeto plano.')
+      new Error(
+        'insert(): formato inválido, se esperaba {data, params} u objeto plano.'
+      )
     );
   }
+
+  const values = Object.values(data);
 
   return new Promise((resolve, reject) => {
     pool.getConnection((err, conn) => {
       if (err) return reject(err);
 
       const sql = `INSERT INTO ${table} (${params}) VALUES (?)`;
-      const values = Object.values(data);
 
       conn.query(sql, [values], (qErr, rows) => {
         conn.release();
@@ -91,12 +117,6 @@ function insert(table, body) {
 }
 
 /* ----------------- UPDATE ----------------- */
-/**
- * Espera data con la PK adecuada:
- *  - bodegas: id_bodega
- *  - otras: id
- * En bodegas: mapea usuario_id -> id_usuario si llega.
- */
 function update(table, data) {
   if (!data || typeof data !== 'object') {
     return Promise.reject(new Error('update(): data inválido.'));
@@ -107,7 +127,9 @@ function update(table, data) {
 
   if (!id) {
     return Promise.reject(
-      new Error(`update(): falta campo PK '${idField}' en data para tabla '${table}'.`)
+      new Error(
+        `update(): falta campo PK '${idField}' en data para tabla '${table}'.`
+      )
     );
   }
 
@@ -120,8 +142,14 @@ function update(table, data) {
     delete copy.usuario_id;
   }
 
-  // sacamos la PK del objeto para no setearla en el SET
   delete copy[idField];
+
+  const keys = Object.keys(copy);
+  if (!keys.length) {
+    return Promise.reject(
+      new Error('update(): no hay campos para actualizar.')
+    );
+  }
 
   return new Promise((resolve, reject) => {
     pool.getConnection((err, conn) => {
@@ -153,10 +181,26 @@ function remove(table, id) {
   });
 }
 
+/* ----------------- RAW QUERY OPCIONAL ----------------- */
+// Por si msApiCubicaje quiere delegar queries directos sin duplicar lógica.
+function query(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    pool.getConnection((err, conn) => {
+      if (err) return reject(err);
+
+      conn.query(sql, params, (qErr, rows) => {
+        conn.release();
+        return qErr ? reject(qErr) : resolve(rows);
+      });
+    });
+  });
+}
+
 module.exports = {
   list,
   get,
   insert,
   update,
   remove,
+  query,
 };
